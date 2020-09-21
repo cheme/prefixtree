@@ -96,6 +96,7 @@ pub trait PrefixKeyConf {
 		(previous_mask, bytes)
 	}
 	/// (get a mask corresponding to a end position).
+	// let mask = !(255u8 >> delta.leading_zeros()); + TODO round to nibble
 	fn mask_from_delta(delta: u8) -> Self::Mask;
 }
 
@@ -148,6 +149,7 @@ impl<D1, D2, P> PartialEq<PrefixKey<D2, P>> for PrefixKey<D1, P>
 			&& self.start == other.start
 			&& self.end == other.end
 			&& (left.len() == 0
+				|| left.len() == 1 && self.unchecked_single_byte() == other.unchecked_single_byte()
 				|| (self.unchecked_first_byte() == other.unchecked_first_byte()
 					&& self.unchecked_last_byte() == other.unchecked_last_byte()
 					&& left[1..left.len() - 1]
@@ -161,7 +163,6 @@ impl<D, P> Eq for PrefixKey<D, P>
 		D: Borrow<[u8]>,
 		P: PrefixKeyConf,
 { }
-
 
 struct Position<P>
 	where
@@ -215,6 +216,10 @@ impl<D, P> PrefixKey<D, P>
 	fn unchecked_last_byte(&self) -> u8 {
 		self.end.mask(self.data.borrow()[self.data.borrow().len() - 1])
 	}
+	fn unchecked_single_byte(&self) -> u8 {
+		self.start.mask(self.end.mask(self.data.borrow()[0]))
+	}
+
 /*	fn pos_start(&self) -> Position<P> {
 		Position {
 			index: 0,
