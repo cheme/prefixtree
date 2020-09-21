@@ -102,7 +102,7 @@ pub trait PrefixKeyConf {
 /// Mask a byte for unaligned prefix key.
 pub trait MaskKeyByte: Eq + core::fmt::Debug {
 	fn mask(&self, byte: u8) -> u8;
-	fn mask_mask(&self, other: Self) -> Self;
+//	fn mask_mask(&self, other: Self) -> Self;
 	fn empty() -> Self;
 }
 
@@ -110,9 +110,9 @@ impl MaskKeyByte for () {
 	fn mask(&self, byte: u8) -> u8 {
 		byte
 	}
-	fn mask_mask(&self, other: Self) -> Self {
+/*	fn mask_mask(&self, other: Self) -> Self {
 		()
-	}
+	}*/
 	fn empty() -> Self {
 		()
 	}
@@ -122,9 +122,9 @@ impl MaskKeyByte for u8 {
 	fn mask(&self, byte: u8) -> u8 {
 		self & byte
 	}
-	fn mask_mask(&self, other: Self) -> Self {
+/*	fn mask_mask(&self, other: Self) -> Self {
 		self & other
-	}
+	}*/
 	fn empty() -> Self {
 		0
 	}
@@ -287,11 +287,11 @@ impl<D, P> PrefixKey<D, P>
 		} else {
 			//let mask = 255u8 >> delta.leading_zeros();
 			let mask = P::mask_from_delta(delta);
-			let mask = if index == 0 {
+/*			let mask = if index == 0 {
 				self.start.mask_mask(mask)
 			} else {
 				mask
-			};
+			};*/
 			Position {
 				index,
 				mask,
