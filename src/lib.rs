@@ -79,6 +79,8 @@ impl<D1, D2> PartialEq<PrefixKey<D2>> for PrefixKey<D1>
 		let left = self.data.borrow();
 		let right = other.data.borrow();
 		left.len() == right.len()
+			&& self.start == other.start
+			&& self.end == other.end
 			&& (left.len() == 0
 				||(self.unchecked_first_byte() == other.unchecked_first_byte()
 					&& self.unchecked_last_byte() == other.unchecked_last_byte()
@@ -132,20 +134,20 @@ impl<D> PrefixKey<D>
 		self.data.borrow()[self.data.borrow().len() - 1] & self.end
 	}
 
-
 	fn pos_start(&self) -> Position {
 		Position {
 			index: 0,
 			mask: self.start,
 		}
 	}
-
+/*
 	fn pos_end(&self) -> Position {
 		Position {
 			index: self.data.borrow().len(),
 			mask: self.end,
 		}
 	}
+*/
 
 	// TODO remove that??
 	fn common_depth(&self, other: &Self) -> Position {
@@ -265,7 +267,7 @@ impl PrefixKey<Vec<u8>>
 		}*/
 		PrefixKey {
 			start: start.mask,
-			end: start.mask,
+			end: 255,
 			data,
 		}
 	}
@@ -273,11 +275,14 @@ impl PrefixKey<Vec<u8>>
 
 #[derive(PartialEq, Eq, Debug)]
 struct Node {
+	// TODO this should be able to use &'a[u8] for iteration
+	// and querying.
 	pub key: PrefixKey<Vec<u8>>,
 	//pub value: usize,
 	pub value: Option<Vec<u8>>,
 	//pub left: usize,
 	//pub right: usize,
+	// TODO if backend behind, then Self would neeed to implement a Node trait with lazy loading...
 	pub children: Children<Self>,
 }
 
@@ -318,7 +323,6 @@ impl PrefixMap {
 			None
 		}
 	}
-
 }
 
 struct KeyIndex { right: bool }
@@ -336,6 +340,7 @@ impl<N> Children<N> {
 		}
 	}
 }
+
 enum Descent {
 	// index in input key
 	Child(Position, KeyIndex),
@@ -382,5 +387,4 @@ mod test {
 		assert_eq!(None, t2.insert(b"key3", value1.clone()));
 		assert_ne!(t1, t2);
 	}
-
 }
