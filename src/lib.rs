@@ -55,22 +55,88 @@ use self::rstd::{boxed::Box, vec::Vec};
 */
 
 #[derive(Debug)]
-struct PrefixKey<D>
-//	where
+struct PrefixKey<D, P>
+	where
+		P: PrefixKeyConf,
 //		D: Borrow<[u8]>,
 {
 	// ([u8; size], next_slice)
-	start: u8, // mask of first byte
-	end: u8, // mask of last byte
+	start: P::Mask, // mask of first byte
+	end: P::Mask, // mask of last byte
 	data: D,
 }
 
-impl<D1, D2> PartialEq<PrefixKey<D2>> for PrefixKey<D1>
+/// Definition of prefix handle.
+pub trait PrefixKeyConf {
+	/// Is key byte align using this definition.
+	const ALIGNED: bool;
+	/// Either u8 or () depending on wether
+	/// we use aligned key.
+	type Mask: MaskKeyByte;
+	/// Index for a given `NodeChildren`.
+	type KeyIndex;
+	/// Maximum number of children per item.
+	const CHILDREN_CAPACITY: usize;
+	/// DEPTH in byte when aligned or in bit (2^DEPTH == NUMBER_CHILDREN).
+	/// TODO is that of any use?
+	const DEPTH: usize;
+	/// Advance one item in depth.
+	/// Return next mask and true if need to advance index.
+	fn advance(previous_mask: Self::Mask) -> (Self::Mask, bool);
+	/// Advance with multiple steps.
+	fn advance_by(mut previous_mask: Self::Mask, nb: usize) -> (Self::Mask, usize) {
+		let mut bytes = 0;
+		for _i in 0..nb {
+			let (new_mask, b) = Self::advance(previous_mask);
+			previous_mask = new_mask;
+			if b {
+				bytes += 1;
+			}
+		}
+		(previous_mask, bytes)
+	}
+	/// (get a mask corresponding to a end position).
+	fn mask_from_delta(delta: u8) -> Self::Mask;
+}
+
+/// Mask a byte for unaligned prefix key.
+pub trait MaskKeyByte: Eq + core::fmt::Debug {
+	fn mask(&self, byte: u8) -> u8;
+	fn mask_mask(&self, other: Self) -> Self;
+	fn empty() -> Self;
+}
+
+impl MaskKeyByte for () {
+	fn mask(&self, byte: u8) -> u8 {
+		byte
+	}
+	fn mask_mask(&self, other: Self) -> Self {
+		()
+	}
+	fn empty() -> Self {
+		()
+	}
+}
+
+impl MaskKeyByte for u8 {
+	fn mask(&self, byte: u8) -> u8 {
+		self & byte
+	}
+	fn mask_mask(&self, other: Self) -> Self {
+		self & other
+	}
+	fn empty() -> Self {
+		0
+	}
+}
+
+impl<D1, D2, P> PartialEq<PrefixKey<D2, P>> for PrefixKey<D1, P>
 	where
 		D1: Borrow<[u8]>,
 		D2: Borrow<[u8]>,
+		P: PrefixKeyConf,
 {
-	fn eq(&self, other: &PrefixKey<D2>) -> bool {
+	fn eq(&self, other: &PrefixKey<D2, P>) -> bool {
 		// !! this means either 255 or 0 mask
 		// is forbidden!!
 		// 0 should be forbidden, 255 when full byte
@@ -82,7 +148,7 @@ impl<D1, D2> PartialEq<PrefixKey<D2>> for PrefixKey<D1>
 			&& self.start == other.start
 			&& self.end == other.end
 			&& (left.len() == 0
-				||(self.unchecked_first_byte() == other.unchecked_first_byte()
+				|| (self.unchecked_first_byte() == other.unchecked_first_byte()
 					&& self.unchecked_last_byte() == other.unchecked_last_byte()
 					&& left[1..left.len() - 1]
 						== right[1..right.len() - 1]
@@ -90,57 +156,72 @@ impl<D1, D2> PartialEq<PrefixKey<D2>> for PrefixKey<D1>
 	}
 }
 
-impl<D> Eq for PrefixKey<D>
+impl<D, P> Eq for PrefixKey<D, P>
 	where
 		D: Borrow<[u8]>,
+		P: PrefixKeyConf,
 { }
 
 
-struct Position {
+struct Position<P>
+	where
+		P: PrefixKeyConf,
+{
 	index: usize,
-	mask: u8,
+	mask: P::Mask,
 }
-impl Position {
+impl<P> Position<P>
+	where
+		P: PrefixKeyConf,
+{
 	fn zero() -> Self {
+		let (mask, next) = P::advance(P::Mask::empty());
+		debug_assert!(!next);
 		Position {
 			index: 0,
-			mask: 255,
+			mask,
 		}
+	}
+	fn mask_first() -> P::Mask {
+		let (mask, next) = P::advance(P::Mask::empty());
+		debug_assert!(!next);
+		mask
 	}
 }
 
-impl<D> PrefixKey<D>
+impl<D, P> PrefixKey<D, P>
 	where
 		D: Borrow<[u8]> + Default,
+		P: PrefixKeyConf,
 {
 	fn empty() -> Self {
 		PrefixKey {
-			start: 0,
-			end: 0,
+			start: P::Mask::empty(),
+			end: P::Mask::empty(),
 			data: Default::default(),
 		}
 	}
 }
 
-impl<D> PrefixKey<D>
+impl<D, P> PrefixKey<D, P>
 	where
 		D: Borrow<[u8]>,
+		P: PrefixKeyConf,
 {
 
 	fn unchecked_first_byte(&self) -> u8 {
-		self.data.borrow()[0] & self.start
+		self.start.mask(self.data.borrow()[0])
 	}
 	fn unchecked_last_byte(&self) -> u8 {
-		self.data.borrow()[self.data.borrow().len() - 1] & self.end
+		self.end.mask(self.data.borrow()[self.data.borrow().len() - 1])
 	}
-
-	fn pos_start(&self) -> Position {
+/*	fn pos_start(&self) -> Position<P> {
 		Position {
 			index: 0,
 			mask: self.start,
 		}
 	}
-/*
+
 	fn pos_end(&self) -> Position {
 		Position {
 			index: self.data.borrow().len(),
@@ -150,9 +231,28 @@ impl<D> PrefixKey<D>
 */
 
 	// TODO remove that??
-	fn common_depth(&self, other: &Self) -> Position {
-		// key must be aligned.
-		assert!(self.start == other.start);
+	fn common_depth(&self, other: &Self) -> Position<P> {
+		if P::ALIGNED {
+			let mut index = 0;
+			let left = self.data.borrow();
+			let right = other.data.borrow();
+			let upper_bound = min(left.len(), right.len());
+			for index in 0..upper_bound {
+				if left[index] != right[index] {
+					return Position {
+						index,
+						mask: P::Mask::empty(),
+					}
+				}
+			}
+			return Position {
+				index: upper_bound,
+				mask: P::Mask::empty(),
+			}
+		}
+		if self.start != other.start {
+			return Position::zero();
+		}
 		let left = self.data.borrow();
 		let right = other.data.borrow();
 		if left.len() == 0 || right.len() == 0 {
@@ -182,10 +282,16 @@ impl<D> PrefixKey<D>
 		if delta == 0 {
 			Position {
 				index: index + 1,
-				mask: 0,
+				mask: P::Mask::empty(),
 			}
 		} else {
-			let mask = 255u8 >> delta.leading_zeros();
+			//let mask = 255u8 >> delta.leading_zeros();
+			let mask = P::mask_from_delta(delta);
+			let mask = if index == 0 {
+				self.start.mask_mask(mask)
+			} else {
+				mask
+			};
 			Position {
 				index,
 				mask,
@@ -193,8 +299,8 @@ impl<D> PrefixKey<D>
 		}
 	}
 
-	fn common_depth_next(&self, other: &Self) -> Descent {
-		// key must be aligned.
+	fn common_depth_next(&self, other: &Self) -> Descent<P> {
+/*		// key must be aligned.
 		assert!(self.start == other.start);
 		let left = self.data.borrow();
 		let right = other.data.borrow();
@@ -240,11 +346,12 @@ impl<D> PrefixKey<D>
 				index,
 				mask,
 			}
-		}
+		}*/
+		unimplemented!()
 	}
-
+/*
 	// TODO remove that??
-	fn index(&self, ix: Position) -> KeyIndex {
+	fn index(&self, ix: Position<P>) -> P::KeyIndex {
 		let mask = 128u8 >> ix.mask.leading_zeros();
 		if (self.data.borrow()[ix.index] & mask) == 0 {
 			KeyIndex {
@@ -256,28 +363,34 @@ impl<D> PrefixKey<D>
 			}
 		}
 	}
+*/
 }
 
-impl PrefixKey<Vec<u8>>
+impl<P> PrefixKey<Vec<u8>, P>
+	where
+		P: PrefixKeyConf,
 {
-	fn new_offset<Q: Borrow<[u8]>>(key: Q, start: Position) -> Self {
+	fn new_offset<Q: Borrow<[u8]>>(key: Q, start: Position<P>) -> Self {
 		let data = key.borrow()[start.index..].to_vec();
 /*		if data.len() > 0 {
 			data[0] &= start.mask; // this update is for Eq implementation
 		}*/
 		PrefixKey {
 			start: start.mask,
-			end: 255,
+			end: P::Mask::empty(),
 			data,
 		}
 	}
 }
 
 #[derive(PartialEq, Eq, Debug)]
-struct Node {
+struct Node<P>
+	where
+		P: PrefixKeyConf,
+{
 	// TODO this should be able to use &'a[u8] for iteration
 	// and querying.
-	pub key: PrefixKey<Vec<u8>>,
+	pub key: PrefixKey<Vec<u8>, P>,
 	//pub value: usize,
 	pub value: Option<Vec<u8>>,
 	//pub left: usize,
@@ -286,8 +399,11 @@ struct Node {
 	pub children: Children<Self>,
 }
 
-impl Node {
-	fn leaf(key: &[u8], start: Position, value: Vec<u8>) -> Self {
+impl<P> Node<P>
+	where
+		P: PrefixKeyConf,
+{
+	fn leaf(key: &[u8], start: Position<P>, value: Vec<u8>) -> Self {
 		Node {
 			key: PrefixKey::new_offset(key, start),
 			value: Some(value),
@@ -297,14 +413,20 @@ impl Node {
 }
 
 #[derive(PartialEq, Eq, Debug)]
-pub struct PrefixMap {
+pub struct PrefixMap<P>
+	where
+		P: PrefixKeyConf,
+{
 	//tree: Vec<Node>,
-	tree: Option<Node>,
+	tree: Option<Node<P>>,
 	//values: Vec<Vec<u8>>,
 	//keys: Vec<u8>,
 }
 
-impl PrefixMap {
+impl<P> PrefixMap<P>
+	where
+		P: PrefixKeyConf,
+{
 	pub fn new() -> Self {
 		PrefixMap {
 			tree: None,
@@ -325,7 +447,6 @@ impl PrefixMap {
 	}
 }
 
-struct KeyIndex { right: bool }
 #[derive(PartialEq, Eq, Debug)]
 struct Children<N> {
 	left: Option<Box<N>>,
@@ -341,20 +462,26 @@ impl<N> Children<N> {
 	}
 }
 
-enum Descent {
+enum Descent<P>
+	where
+		P: PrefixKeyConf,
+{
 	// index in input key
-	Child(Position, KeyIndex),
-	Middle(Position, KeyIndex),
-	Match(Position),
+	Child(Position<P>, P::KeyIndex),
+	Middle(Position<P>, P::KeyIndex),
+	Match(Position<P>),
 //	// position mask left of this node
 //	Middle(usize, u8),
 }
 
-impl Node {
-	fn prefix_node(&self, key: &[u8]) -> (&Self, Descent) {
+impl<P> Node<P>
+	where
+		P: PrefixKeyConf,
+{
+	fn prefix_node(&self, key: &[u8]) -> (&Self, Descent<P>) {
 		unimplemented!()
 	}
-	fn prefix_node_mut(&mut self, key: &[u8]) -> (&mut Self, Descent) {
+	fn prefix_node_mut(&mut self, key: &[u8]) -> (&mut Self, Descent<P>) {
 		unimplemented!()
 	}
 }
