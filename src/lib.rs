@@ -489,7 +489,7 @@ impl<P> PrefixKey<Vec<u8>, P>
 #[derivative(Clone)]
 #[derivative(Debug)]
 #[derivative(PartialEq)]
-struct NodeOld256<P>
+struct NodeOld2<P>
 	where
 		P: RadixConf,
 //		C: Children<Self, Radix = P>,
@@ -505,7 +505,7 @@ struct NodeOld256<P>
 	pub children: Children256<Self>,
 }
 
-impl<P> Node for NodeOld256<P>
+impl<P> Node for NodeOld2<P>
 	where
 		P: RadixConf,
 {
@@ -517,7 +517,7 @@ impl<P> Node for NodeOld256<P>
 		value: Option<&[u8]>,
 		_init: Self::InitFrom,
 	) -> Self {
-		NodeOld256 {
+		NodeOld2 {
 			key: PrefixKey::new_offset(key, position),
 			value: value.map(|v| v.to_vec()),
 			children: Children256::<Self>::empty(),
@@ -532,7 +532,7 @@ impl<P> Node for NodeOld256<P>
 struct NodeOld<P, C>
 	where
 		P: RadixConf,
-		C: Children<Self, Radix = P>,
+//		C: Children<Self, Radix = P>,
 {
 	// TODO this should be able to use &'a[u8] for iteration
 	// and querying.
@@ -544,7 +544,7 @@ struct NodeOld<P, C>
 	// TODO if backend behind, then Self would neeed to implement a Node trait with lazy loading...
 	pub children: C,
 }
-
+/*
 impl<P, C> NodeOld<P, C>
 	where
 		P: RadixConf,
@@ -558,6 +558,7 @@ impl<P, C> NodeOld<P, C>
 		}
 	}
 }
+*/
 
 impl<P, C> Node for NodeOld<P, C>
 	where
@@ -708,6 +709,34 @@ impl<P, C> NodeOld<P, C>
 		unimplemented!()
 	}
 }
+
+
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(Debug)]
+#[derivative(PartialEq)]
+struct NodeTst {
+	inner: NodeOld<Radix256RadixConf, Children256<NodeTst>>,
+}
+
+impl Node for NodeTst
+{
+	type Radix = Radix256RadixConf;
+	type InitFrom = ();
+	fn new(
+		key: &[u8],
+		position: PositionFor<Self>,
+		value: Option<&[u8]>,
+		_init: Self::InitFrom,
+	) -> Self {
+		NodeTst{ inner: NodeOld {
+			key: PrefixKey::new_offset(key, position),
+			value: value.map(|v| v.to_vec()),
+			children: Children256::<NodeTst>::empty(),
+		}}
+	}
+}
+
 
 #[cfg(test)]
 mod test {
