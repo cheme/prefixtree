@@ -141,10 +141,10 @@ pub trait Node: Clone + PartialEq + Debug {
 	) -> Self;
 }
 
-pub struct Radix256RadixConf;
+pub struct Radix256Conf;
 pub struct Radix2Conf;
 
-impl RadixConf for Radix256RadixConf {
+impl RadixConf for Radix256Conf {
 	type Alignment = ();
 	type KeyIndex = u8;
 	const CHILDREN_CAPACITY: usize = 256;
@@ -636,19 +636,56 @@ impl<N: Debug> Debug for Children256<N> {
 }
 
 impl<N: Node> Children<N> for Children256<N> {
-	type Radix = Radix256RadixConf;
+	type Radix = Radix256Conf;
 
 	fn empty() -> Self {
 		Children256(None)
 	}
 }
 
+/// Flatten type for children of a given node type.
+/// `inner_node_type` is expected to be parametered by a `Children` type
+/// and a `RadixConf` type.
+macro_rules! flatten_children {
+	($type_alias: ident, $inner_children_type: ident, $inner_node_type: ident, $inner_type: ident, $inner_radix: ident) => {
+		type $inner_children_type = $inner_node_type<$inner_radix, $type_alias>;
+		#[derive(Derivative)]
+		#[derivative(Clone)]
+		#[derivative(PartialEq)]
+		#[derivative(Debug)]
+		struct $type_alias($inner_type<$inner_children_type>);
+
+		impl Children<$inner_children_type> for $type_alias {
+			type Radix = $inner_radix;
+
+			fn empty() -> Self {
+				$type_alias($inner_type::empty())
+			}
+		}
+	}
+}
+flatten_children!(Children256Flatten, Node256Flatten, NodeOld, Children256, Radix256Conf);
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(PartialEq)]
+#[derivative(Debug)]
+struct Children256Tierce(Children256<NodeOld<Radix256Conf, Children256Tierce>>);
+
+impl Children<NodeOld<Radix256Conf, Children256Tierce>> for Children256Tierce {
+	type Radix = Radix256Conf;
+
+	fn empty() -> Self {
+		Children256Tierce(Children256::<NodeOld<Radix256Conf, Children256Tierce>>::empty())
+	}
+}
+
+
 // TODO macro the specialized impl
 #[derive(Derivative)]
 #[derivative(Clone)]
 struct Children256Bis (
 	// 256 array is to big but ok for initial implementation
-	Option<Box<[NodeOld<Radix256RadixConf, Children256Bis>; 256]>>
+	Option<Box<[NodeOld<Radix256Conf, Children256Bis>; 256]>>
 );
 
 impl PartialEq for Children256Bis {
@@ -672,14 +709,14 @@ impl Debug for Children256Bis {
 		if let Some(children) = self.0.as_ref() {
 			children[..].fmt(f)
 		} else {
-			let empty: &[NodeOld<Radix256RadixConf, Children256Bis>] = &[]; 
+			let empty: &[NodeOld<Radix256Conf, Children256Bis>] = &[]; 
 			empty.fmt(f)
 		}
 	}
 }
 
-impl Children<NodeOld<Radix256RadixConf, Children256Bis>> for Children256Bis {
-	type Radix = Radix256RadixConf;
+impl Children<NodeOld<Radix256Conf, Children256Bis>> for Children256Bis {
+	type Radix = Radix256Conf;
 
 	fn empty() -> Self {
 		Children256Bis(None)
@@ -717,12 +754,12 @@ impl<P, C> NodeOld<P, C>
 #[derivative(Debug)]
 #[derivative(PartialEq)]
 struct NodeTst {
-	inner: NodeOld<Radix256RadixConf, Children256<NodeTst>>,
+	inner: NodeOld<Radix256Conf, Children256<NodeTst>>,
 }
 
 impl Node for NodeTst
 {
-	type Radix = Radix256RadixConf;
+	type Radix = Radix256Conf;
 	type InitFrom = ();
 	fn new(
 		key: &[u8],
@@ -743,7 +780,7 @@ impl Node for NodeTst
 mod test {
 	use crate::*;
 
-	type Node = NodeOld<Radix256RadixConf, Children256Bis>;
+	type Node = NodeOld<Radix256Conf, Children256Flatten>;
 
 	#[test]
 	fn empty_are_equals() {
