@@ -484,47 +484,6 @@ impl<P> PrefixKey<Vec<u8>, P>
 	}
 }
 
-// TODO macro node code to replace children instance
-#[derive(Derivative)]
-#[derivative(Clone)]
-#[derivative(Debug)]
-#[derivative(PartialEq)]
-struct NodeOld2<P>
-	where
-		P: RadixConf,
-//		C: Children<Self, Radix = P>,
-{
-	// TODO this should be able to use &'a[u8] for iteration
-	// and querying.
-	pub key: PrefixKey<Vec<u8>, P::Alignment>,
-	//pub value: usize,
-	pub value: Option<Vec<u8>>,
-	//pub left: usize,
-	//pub right: usize,
-	// TODO if backend behind, then Self would neeed to implement a Node trait with lazy loading...
-	pub children: Children256<Self>,
-}
-
-impl<P> Node for NodeOld2<P>
-	where
-		P: RadixConf,
-{
-	type Radix = P;
-	type InitFrom = ();
-	fn new(
-		key: &[u8],
-		position: PositionFor<Self>,
-		value: Option<&[u8]>,
-		_init: Self::InitFrom,
-	) -> Self {
-		NodeOld2 {
-			key: PrefixKey::new_offset(key, position),
-			value: value.map(|v| v.to_vec()),
-			children: Children256::<Self>::empty(),
-		}
-	}
-}
-
 #[derive(Derivative)]
 #[derivative(Clone)]
 #[derivative(Debug)]
@@ -684,6 +643,48 @@ impl<N: Node> Children<N> for Children256<N> {
 	}
 }
 
+// TODO macro the specialized impl
+#[derive(Derivative)]
+#[derivative(Clone)]
+struct Children256Bis (
+	// 256 array is to big but ok for initial implementation
+	Option<Box<[NodeOld<Radix256RadixConf, Children256Bis>; 256]>>
+);
+
+impl PartialEq for Children256Bis {
+	fn eq(&self, other: &Self) -> bool {
+		match (self.0.as_ref(), other.0.as_ref()) {
+			(Some(self_children), Some(other_children)) =>  {
+				for i in 0..256 {
+					if self_children[i] != other_children[i] {
+						return false;
+					}
+				}
+				true
+			},
+			(None, None) => true,
+			_ => false,
+		}
+	}
+}
+impl Debug for Children256Bis {
+	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::result::Result<(), core::fmt::Error> {
+		if let Some(children) = self.0.as_ref() {
+			children[..].fmt(f)
+		} else {
+			let empty: &[NodeOld<Radix256RadixConf, Children256Bis>] = &[]; 
+			empty.fmt(f)
+		}
+	}
+}
+
+impl Children<NodeOld<Radix256RadixConf, Children256Bis>> for Children256Bis {
+	type Radix = Radix256RadixConf;
+
+	fn empty() -> Self {
+		Children256Bis(None)
+	}
+}
 
 enum Descent<P>
 	where
@@ -742,7 +743,7 @@ impl Node for NodeTst
 mod test {
 	use crate::*;
 
-	type Node = NodeOld2<Radix256RadixConf>;
+	type Node = NodeOld<Radix256RadixConf, Children256Bis>;
 
 	#[test]
 	fn empty_are_equals() {
