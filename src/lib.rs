@@ -97,7 +97,7 @@ pub trait RadixConf {
 	/// Prefix alignement and mask.
 	type Alignment: PrefixKeyConf;
 	/// Index for a given `NodeChildren`.
-	type KeyIndex;
+	type KeyIndex: NodeIndex;
 	/// Maximum number of children per item.
 	const CHILDREN_CAPACITY: usize;
 	/// DEPTH in byte when aligned or in bit (2^DEPTH == NUMBER_CHILDREN).
@@ -128,6 +128,7 @@ pub trait RadixConf {
 }
 
 type PositionFor<N> = Position<<<N as Node>::Radix as RadixConf>::Alignment>;
+type KeyIndexFor<N> = <<N as Node>::Radix as RadixConf>::KeyIndex;
 
 pub trait Node: Clone + PartialEq + Debug {
 	type Radix: RadixConf;
@@ -139,6 +140,19 @@ pub trait Node: Clone + PartialEq + Debug {
 		value: Option<&[u8]>,
 		init: Self::InitFrom,
 	) -> Self;
+	fn descend(
+		&self,
+		key: &[u8],
+		node_position: PositionFor<Self>,
+		dest_position: PositionFor<Self>,
+	) -> Descent<Self::Radix>;
+	fn value(
+		&self,
+	) -> Option<&[u8]>; // TODO parameterized with V
+	fn get_child(
+		&self,
+		index: KeyIndexFor<Self>,
+	) -> Option<&Self>;
 }
 
 pub struct Radix256RadixConf;
@@ -188,7 +202,7 @@ impl RadixConf for Radix2Conf {
 }
 
 /// Mask a byte for unaligned prefix key.
-pub trait MaskKeyByte: Clone + PartialEq + Debug {
+pub trait MaskKeyByte: Clone + Copy + PartialEq + Debug {
 	fn mask(&self, byte: u8) -> u8;
 //	fn mask_mask(&self, other: Self) -> Self;
 	fn empty() -> Self;
@@ -265,6 +279,9 @@ impl<D, P> Eq for PrefixKey<D, P>
 		P: PrefixKeyConf,
 { }
 
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(Copy)]
 pub struct Position<P>
 	where
 		P: PrefixKeyConf,
@@ -272,6 +289,7 @@ pub struct Position<P>
 	index: usize,
 	mask: P::Mask,
 }
+
 impl<P> Position<P>
 	where
 		P: PrefixKeyConf,
@@ -279,6 +297,13 @@ impl<P> Position<P>
 	fn zero() -> Self {
 		Position {
 			index: 0,
+			mask: P::Mask::empty(),
+		}
+	}
+	fn next<R: RadixConf<Alignment = P>>(&self) -> Self {
+		let (mask, increment) = R::advance(self.mask);
+		Position {
+			index: self.index + increment,
 			mask: P::Mask::empty(),
 		}
 	}
@@ -538,6 +563,25 @@ impl<P, C> Node for NodeOld<P, C>
 			children: C::empty(),
 		}
 	}
+	fn descend(
+		&self,
+		key: &[u8],
+		node_position: PositionFor<Self>,
+		dest_position: PositionFor<Self>,
+	) -> Descent<Self::Radix> {
+		unimplemented!()
+	}
+	fn value(
+		&self,
+	) -> Option<&[u8]> {
+		unimplemented!()
+	}
+	fn get_child(
+		&self,
+		index: KeyIndexFor<Self>,
+	) -> Option<&Self> {
+		unimplemented!()
+	}
 }
 
 #[derive(Derivative)]
@@ -584,6 +628,38 @@ pub trait Children<N>: Clone + Debug + PartialEq {
 
 	fn empty() -> Self;
 }
+
+pub trait NodeIndex: Clone + Copy + Debug + PartialEq {
+	fn zero() -> Self;
+	fn next(&self) -> Option<Self>;
+}
+
+impl NodeIndex for bool {
+	fn zero() -> Self {
+		false
+	}
+	fn next(&self) -> Option<Self> {
+		if *self {
+			None
+		} else {
+			Some(true)
+		}
+	}
+}
+
+impl NodeIndex for u8 {
+	fn zero() -> Self {
+		0
+	}
+	fn next(&self) -> Option<Self> {
+		if *self == 255 {
+			None
+		} else {
+			Some(*self + 1)
+		}
+	}
+}
+
 
 #[derive(Derivative)]
 #[derivative(Clone)]
@@ -686,13 +762,22 @@ impl Children<NodeOld<Radix256RadixConf, Children256Bis>> for Children256Bis {
 	}
 }
 
-enum Descent<P>
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(Copy)]
+pub enum Descent<P>
 	where
 		P: RadixConf,
 {
 	// index in input key
+	/// Position is the position of branch, child is at position + 1.
+	/// Index is index for the child at position.
 	Child(Position<P::Alignment>, P::KeyIndex),
+	/// Position is the position where we branch from key.
+	/// Index is the index where we can insert child for this key. TODO consider removing
+	/// index (we probably need to calculate the current child index too.
 	Middle(Position<P::Alignment>, P::KeyIndex),
+	/// Position is the position of the node that match.
 	Match(Position<P::Alignment>),
 //	// position mask left of this node
 //	Middle(usize, u8),
@@ -711,33 +796,136 @@ impl<P, C> NodeOld<P, C>
 	}
 }
 
-
-#[derive(Derivative)]
-#[derivative(Clone)]
-#[derivative(Debug)]
-#[derivative(PartialEq)]
-struct NodeTst {
-	inner: NodeOld<Radix256RadixConf, Children256<NodeTst>>,
+/// Stack of Node to reach a position.
+struct NodeStack<'a, N: Node> {
+	// TODO use smallvec instead
+	stack: Vec<(PositionFor<N>, &'a N)>,
+	// The key used with the stack.
+	// key: Vec<u8>,
 }
 
-impl Node for NodeTst
-{
-	type Radix = Radix256RadixConf;
-	type InitFrom = ();
-	fn new(
-		key: &[u8],
-		position: PositionFor<Self>,
-		value: Option<&[u8]>,
-		_init: Self::InitFrom,
-	) -> Self {
-		NodeTst{ inner: NodeOld {
-			key: PrefixKey::new_offset(key, position),
-			value: value.map(|v| v.to_vec()),
-			children: Children256::<NodeTst>::empty(),
-		}}
+// TODO put pointers in node stack.
+impl<'a, N: Node> NodeStack<'a, N> {
+	fn new() -> Self {
+		NodeStack {
+			stack: Vec::new(),
+		}
+	}
+}
+impl<'a, N: Node> NodeStack<'a, N> {
+	fn descend(&self, key: &[u8], dest_position: PositionFor<N>) -> Descent<N::Radix> {
+		if let Some(top) = self.stack.last() {
+			top.1.descend(key, top.0, dest_position)
+		} else {
+			// using a random key index for root element
+			Descent::Child(PositionFor::<N>::zero(), KeyIndexFor::<N>::zero())
+		}
 	}
 }
 
+pub struct SeekIter<'a, N: Node> {
+	trie: &'a Trie<N>,
+	dest: &'a [u8],
+	dest_position: PositionFor<N>,
+	// TODO seekiter could be lighter and not stack, 
+	// just keep latest: a stack trait could be use.
+	stack: NodeStack<'a, N>,
+	reach_dest: bool,
+	next: Descent<N::Radix>,
+}
+pub struct SeekValueIter<'a, N: Node>(SeekIter<'a, N>);
+	
+impl<N: Node> Trie<N> {
+	pub fn seek_iter<'a>(&'a self, key: &'a [u8]) -> SeekIter<'a, N> {
+		let dest_position = Position {
+			index: key.len(),
+			mask: MaskFor::<N::Radix>::empty(),
+		};
+		self.seek_iter_at(key, dest_position)
+	}
+	/// Seek non byte aligned nodes.
+	pub fn seek_iter_at<'a>(&'a self, key: &'a [u8], dest_position: PositionFor<N>) -> SeekIter<'a, N> {
+		let stack = NodeStack::new();
+		let reach_dest = false;
+		let next = stack.descend(key, dest_position);
+		SeekIter {
+			trie: self,
+			dest: key,
+			dest_position,
+			stack,
+			reach_dest,
+			next,
+		}
+	}
+}
+
+
+impl<'a, N: Node> SeekIter<'a, N> {
+	pub fn value_iter(self) -> SeekValueIter<'a, N> {
+		SeekValueIter(self)
+	}
+	fn next_node(&mut self) -> Option<(PositionFor<N>, &'a N)> {
+		if self.reach_dest {
+			return None;
+		}
+		match self.next {
+			Descent::Child(position, index) => {
+				if let Some(parent) = self.stack.stack.last() {
+					// TODO stack child
+					if let Some(child) = parent.1.get_child(index) {
+						let position = position.next::<N::Radix>();
+						self.stack.stack.push((position, child));
+					} else {
+						self.reach_dest = true;
+						return None;
+					}
+				} else {
+					// empty trie
+					//		// TODO put ref in stack.
+					if let Some(node) = self.trie.tree.as_ref() {
+						let zero = PositionFor::<N>::zero();
+						self.stack.stack.push((zero, node));
+					} else {
+						self.reach_dest = true;
+					}
+				}
+			},
+			Descent::Middle(_position, _index) => {
+				self.reach_dest = true;
+				return None;
+			},
+			Descent::Match(_position) => {
+				self.reach_dest = true;
+			},
+		}
+		if !self.reach_dest {
+			self.next = self.stack.descend(&self.dest, self.dest_position);
+		}
+		self.stack.stack.last().map(|last| (last.0, last.1))
+	}
+}
+
+impl<'a, N: Node> Iterator for SeekIter<'a, N> {
+	type Item = (&'a [u8], PositionFor<N>, &'a N);
+	fn next(&mut self) -> Option<Self::Item> {
+		self.next_node().map(|(pos, node)| (self.dest, pos, node))
+	}
+}
+
+impl<'a, N: Node> Iterator for SeekValueIter<'a, N> {
+	type Item = (&'a [u8], &'a [u8]);
+	fn next(&mut self) -> Option<Self::Item> {
+		loop {
+			if let Some((key, _pos, node)) = self.0.next() {
+				if let Some(v) = node.value() {
+					return Some((key, v))
+				}
+			} else {
+				return None;
+			}
+		}
+	}
+}
 
 #[cfg(test)]
 mod test {
