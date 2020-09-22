@@ -978,8 +978,9 @@ pub struct SeekIterMut<'a, N: Node> {
 	trie: &'a mut Trie<N>,
 	dest: &'a [u8],
 	dest_position: PositionFor<N>,
-	// TODO seekiter could be lighter and not stack, 
-	// just keep latest: a stack trait could be use.
+	// Here NodeStackMut will be used through unsafe
+	// calls, so it should always be 'a with
+	// content comming only form trie field.
 	stack: NodeStackMut<N>,
 	reach_dest: bool,
 	next: Descent<N::Radix>,
