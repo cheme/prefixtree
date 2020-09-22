@@ -149,10 +149,18 @@ pub trait Node: Clone + PartialEq + Debug {
 	fn value(
 		&self,
 	) -> Option<&[u8]>; // TODO parameterized with V
+	fn value_mut(
+		&mut self,
+	) -> Option<&mut Vec<u8>>; // TODO parameterized with V
 	fn get_child(
 		&self,
 		index: KeyIndexFor<Self>,
 	) -> Option<&Self>;
+	fn get_child_mut(
+		&mut self,
+		index: KeyIndexFor<Self>,
+	) -> Option<&mut Self>;
+
 }
 
 pub struct Radix256RadixConf;
@@ -576,10 +584,21 @@ impl<P, C> Node for NodeOld<P, C>
 	) -> Option<&[u8]> {
 		unimplemented!()
 	}
+	fn value_mut(
+		&mut self,
+	) -> Option<&mut Vec<u8>> {
+		unimplemented!()
+	}
 	fn get_child(
 		&self,
 		index: KeyIndexFor<Self>,
 	) -> Option<&Self> {
+		unimplemented!()
+	}
+	fn get_child_mut(
+		&mut self,
+		index: KeyIndexFor<Self>,
+	) -> Option<&mut Self> {
 		unimplemented!()
 	}
 }
@@ -822,6 +841,35 @@ impl<'a, N: Node> NodeStack<'a, N> {
 		}
 	}
 }
+/// Stack of Node to reach a position.
+struct NodeStackMut<N: Node> {
+	// TODO use smallvec instead
+	stack: Vec<(PositionFor<N>, *mut N)>,
+	// The key used with the stack.
+	// key: Vec<u8>,
+}
+
+// TODO put pointers in node stack.
+impl<N: Node> NodeStackMut<N> {
+	fn new() -> Self {
+		NodeStackMut {
+			stack: Vec::new(),
+		}
+	}
+}
+impl<N: Node> NodeStackMut<N> {
+	fn descend(&self, key: &[u8], dest_position: PositionFor<N>) -> Descent<N::Radix> {
+		if let Some(top) = self.stack.last() {
+			unsafe {
+				top.1.as_mut().unwrap().descend(key, top.0, dest_position)
+			}
+		} else {
+			// using a random key index for root element
+			Descent::Child(PositionFor::<N>::zero(), KeyIndexFor::<N>::zero())
+		}
+	}
+}
+
 
 pub struct SeekIter<'a, N: Node> {
 	trie: &'a Trie<N>,
@@ -913,6 +961,114 @@ impl<'a, N: Node> Iterator for SeekIter<'a, N> {
 }
 
 impl<'a, N: Node> Iterator for SeekValueIter<'a, N> {
+	type Item = (&'a [u8], &'a [u8]);
+	fn next(&mut self) -> Option<Self::Item> {
+		loop {
+			if let Some((key, _pos, node)) = self.0.next() {
+				if let Some(v) = node.value() {
+					return Some((key, v))
+				}
+			} else {
+				return None;
+			}
+		}
+	}
+}
+pub struct SeekIterMut<'a, N: Node> {
+	trie: &'a mut Trie<N>,
+	dest: &'a [u8],
+	dest_position: PositionFor<N>,
+	// TODO seekiter could be lighter and not stack, 
+	// just keep latest: a stack trait could be use.
+	stack: NodeStackMut<N>,
+	reach_dest: bool,
+	next: Descent<N::Radix>,
+}
+pub struct SeekValueIterMut<'a, N: Node>(SeekIterMut<'a, N>);
+	
+impl<N: Node> Trie<N> {
+	pub fn seek_iter_mut<'a>(&'a mut self, key: &'a [u8]) -> SeekIterMut<'a, N> {
+		let dest_position = Position {
+			index: key.len(),
+			mask: MaskFor::<N::Radix>::empty(),
+		};
+		self.seek_iter_at_mut(key, dest_position)
+	}
+	/// Seek non byte aligned nodes.
+	pub fn seek_iter_at_mut<'a>(&'a mut self, key: &'a [u8], dest_position: PositionFor<N>) -> SeekIterMut<'a, N> {
+		let stack = NodeStackMut::new();
+		let reach_dest = false;
+		let next = stack.descend(key, dest_position);
+		SeekIterMut {
+			trie: self,
+			dest: key,
+			dest_position,
+			stack,
+			reach_dest,
+			next,
+		}
+	}
+}
+
+
+impl<'a, N: Node> SeekIterMut<'a, N> {
+	pub fn value_iter(self) -> SeekValueIterMut<'a, N> {
+		SeekValueIterMut(self)
+	}
+	fn next_node(&mut self) -> Option<(PositionFor<N>, &'a mut N)> {
+		if self.reach_dest {
+			return None;
+		}
+		match self.next {
+			Descent::Child(position, index) => {
+				if let Some(parent) = self.stack.stack.last_mut() {
+					// TODO stack child
+					if let Some(child) = unsafe {
+						parent.1.as_mut().unwrap().get_child_mut(index) 
+					} {
+						let child = child as *mut _;
+						let position = position.next::<N::Radix>();
+						self.stack.stack.push((position, child));
+					} else {
+						self.reach_dest = true;
+						return None;
+					}
+				} else {
+					// empty trie
+					//		// TODO put ref in stack.
+					if let Some(node) = self.trie.tree.as_mut() {
+						let zero = PositionFor::<N>::zero();
+						self.stack.stack.push((zero, node));
+					} else {
+						self.reach_dest = true;
+					}
+				}
+			},
+			Descent::Middle(_position, _index) => {
+				self.reach_dest = true;
+				return None;
+			},
+			Descent::Match(_position) => {
+				self.reach_dest = true;
+			},
+		}
+		if !self.reach_dest {
+			self.next = self.stack.descend(&self.dest, self.dest_position);
+		}
+		self.stack.stack.last().map(|last| (
+			last.0,
+			unsafe { last.1.as_mut().unwrap() },
+		))
+	}
+}
+impl<'a, N: Node> Iterator for SeekIterMut<'a, N> {
+	type Item = (&'a [u8], PositionFor<N>, &'a mut N);
+	fn next(&mut self) -> Option<Self::Item> {
+		self.next_node().map(|(pos, node)| (self.dest, pos, node))
+	}
+}
+
+impl<'a, N: Node> Iterator for SeekValueIterMut<'a, N> {
 	type Item = (&'a [u8], &'a [u8]);
 	fn next(&mut self) -> Option<Self::Item> {
 		loop {
