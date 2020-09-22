@@ -8,6 +8,7 @@ edition = "2018"
 
 
 [dependencies]
+derivative = { version = "2.1", features = ["use_core"] }
 #smallvec = "1.0.0"
 
 [dev-dependencies]

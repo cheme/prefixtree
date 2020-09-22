@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+
 // rawvec api handling alloc is quite nice -> TODO manage alloc the same way,
 // for now just using vec with usize as ptr
 //#![feature(allow_internal_unstable)] 
@@ -24,10 +25,12 @@
 extern crate alloc;
 
 //use alloc::raw_vec::RawVec;
+use derivative::Derivative;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::borrow::Borrow;
 use core::cmp::min;
+use core::fmt::Debug;
 
 /*#[cfg(not(feature = "std"))]
 extern crate alloc; // TODO check if needed in 2018 and if needed at all
@@ -54,7 +57,9 @@ use hash_db::MaybeDebug;
 use self::rstd::{boxed::Box, vec::Vec};
 */
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(Debug)]
 struct PrefixKey<D, P>
 	where
 		P: PrefixKeyConf,
@@ -73,6 +78,24 @@ pub trait PrefixKeyConf {
 	/// Either u8 or () depending on wether
 	/// we use aligned key.
 	type Mask: MaskKeyByte;
+}
+
+impl PrefixKeyConf for () {
+	const ALIGNED: bool = true;
+	type Mask = ();
+}
+
+impl PrefixKeyConf for bool {
+	const ALIGNED: bool = false;
+	type Mask = bool;
+}
+
+type MaskFor<N> = <<N as RadixConf>::Alignment as PrefixKeyConf>::Mask;
+
+/// Definition of node handle.
+pub trait RadixConf {
+	/// Prefix alignement and mask.
+	type Alignment: PrefixKeyConf;
 	/// Index for a given `NodeChildren`.
 	type KeyIndex;
 	/// Maximum number of children per item.
@@ -81,27 +104,91 @@ pub trait PrefixKeyConf {
 	/// TODO is that of any use?
 	const DEPTH: usize;
 	/// Advance one item in depth.
-	/// Return next mask and true if need to advance index.
-	fn advance(previous_mask: Self::Mask) -> (Self::Mask, bool);
+	/// Return next mask and number of incremented bytes.
+	fn advance(previous_mask: MaskFor<Self>) -> (MaskFor<Self>, usize);
 	/// Advance with multiple steps.
-	fn advance_by(mut previous_mask: Self::Mask, nb: usize) -> (Self::Mask, usize) {
+	fn advance_by(mut previous_mask: MaskFor<Self>, nb: usize) -> (MaskFor<Self>, usize) {
 		let mut bytes = 0;
 		for _i in 0..nb {
 			let (new_mask, b) = Self::advance(previous_mask);
 			previous_mask = new_mask;
-			if b {
-				bytes += 1;
-			}
+			bytes += b;
 		}
 		(previous_mask, bytes)
 	}
 	/// (get a mask corresponding to a end position).
 	// let mask = !(255u8 >> delta.leading_zeros()); + TODO round to nibble
-	fn mask_from_delta(delta: u8) -> Self::Mask;
+	fn mask_from_delta(delta: u8) -> MaskFor<Self>;
+
+	fn mask_first() -> MaskFor<Self> {
+		let (mask, next) = Self::advance(MaskFor::<Self>::empty());
+		debug_assert!(next == 0);
+		mask
+	}
+}
+
+type PositionFor<N> = Position<<<N as Node>::Radix as RadixConf>::Alignment>;
+
+pub trait Node: Clone + PartialEq + Debug {
+	type Radix: RadixConf;
+	type InitFrom;
+
+	fn new(
+		key: &[u8],
+		position: PositionFor<Self>,
+		value: Option<&[u8]>,
+		init: Self::InitFrom,
+	) -> Self;
+}
+
+pub struct Radix256RadixConf;
+pub struct Radix2Conf;
+
+impl RadixConf for Radix256RadixConf {
+	type Alignment = ();
+	type KeyIndex = u8;
+	const CHILDREN_CAPACITY: usize = 256;
+	const DEPTH: usize = 1;
+	fn advance(_previous_mask: MaskFor<Self>) -> (MaskFor<Self>, usize) {
+		((), 1)
+	}
+	fn advance_by(_previous_mask: MaskFor<Self>, nb: usize) -> (MaskFor<Self>, usize) {
+		((), nb)
+	}
+	fn mask_from_delta(_delta: u8) -> MaskFor<Self> {
+		()
+	}
+
+	fn mask_first() -> MaskFor<Self> {
+		()
+	}
+}
+
+impl RadixConf for Radix2Conf {
+	type Alignment = bool;
+	type KeyIndex = bool;
+	const CHILDREN_CAPACITY: usize = 2;
+	const DEPTH: usize = 1;
+	fn advance(previous_mask: MaskFor<Self>) -> (MaskFor<Self>, usize) {
+		if previous_mask {
+			(false, 1)
+		} else {
+			(true, 0)
+		}
+	}
+	fn advance_by(_previous_mask: MaskFor<Self>, nb: usize) -> (MaskFor<Self>, usize) {
+		unimplemented!()
+	}
+	fn mask_from_delta(_delta: u8) -> MaskFor<Self> {
+		unimplemented!()
+	}
+	fn mask_first() -> MaskFor<Self> {
+		true
+	}
 }
 
 /// Mask a byte for unaligned prefix key.
-pub trait MaskKeyByte: Eq + core::fmt::Debug {
+pub trait MaskKeyByte: Clone + PartialEq + Debug {
 	fn mask(&self, byte: u8) -> u8;
 //	fn mask_mask(&self, other: Self) -> Self;
 	fn empty() -> Self;
@@ -118,6 +205,20 @@ impl MaskKeyByte for () {
 		()
 	}
 }
+
+impl MaskKeyByte for bool {
+	fn mask(&self, byte: u8) -> u8 {
+		if *self {
+			byte & 0xf0
+		} else {
+			byte
+		}
+	}
+	fn empty() -> Self {
+		false
+	}
+}
+
 
 impl MaskKeyByte for u8 {
 	fn mask(&self, byte: u8) -> u8 {
@@ -164,7 +265,7 @@ impl<D, P> Eq for PrefixKey<D, P>
 		P: PrefixKeyConf,
 { }
 
-struct Position<P>
+pub struct Position<P>
 	where
 		P: PrefixKeyConf,
 {
@@ -176,17 +277,10 @@ impl<P> Position<P>
 		P: PrefixKeyConf,
 {
 	fn zero() -> Self {
-		let (mask, next) = P::advance(P::Mask::empty());
-		debug_assert!(!next);
 		Position {
 			index: 0,
-			mask,
+			mask: P::Mask::empty(),
 		}
-	}
-	fn mask_first() -> P::Mask {
-		let (mask, next) = P::advance(P::Mask::empty());
-		debug_assert!(!next);
-		mask
 	}
 }
 
@@ -234,37 +328,41 @@ impl<D, P> PrefixKey<D, P>
 		}
 	}
 */
-
-	// TODO remove that??
-	fn common_depth(&self, other: &Self) -> Position<P> {
-		if P::ALIGNED {
+}
+// TODO remove that??
+fn common_depth<D, N>(one: &PrefixKey<D, N::Alignment>, other: &PrefixKey<D, N::Alignment>) -> Position<N::Alignment>
+	where
+		D: Borrow<[u8]>,
+		N: RadixConf,
+{
+		if N::Alignment::ALIGNED {
 			let mut index = 0;
-			let left = self.data.borrow();
+			let left = one.data.borrow();
 			let right = other.data.borrow();
 			let upper_bound = min(left.len(), right.len());
 			for index in 0..upper_bound {
 				if left[index] != right[index] {
 					return Position {
 						index,
-						mask: P::Mask::empty(),
+						mask: MaskFor::<N>::empty(),
 					}
 				}
 			}
 			return Position {
 				index: upper_bound,
-				mask: P::Mask::empty(),
+				mask: MaskFor::<N>::empty(),
 			}
 		}
-		if self.start != other.start {
+		if one.start != other.start {
 			return Position::zero();
 		}
-		let left = self.data.borrow();
+		let left = one.data.borrow();
 		let right = other.data.borrow();
 		if left.len() == 0 || right.len() == 0 {
 			return Position::zero();
 		}
 		let mut index = 0;
-		let mut delta = self.unchecked_first_byte() ^ other.unchecked_last_byte();
+		let mut delta = one.unchecked_first_byte() ^ other.unchecked_last_byte();
 		if delta == 0 {
 			let upper_bound = min(left.len(), right.len());
 			for i in 1..(upper_bound - 1) {
@@ -276,7 +374,7 @@ impl<D, P> PrefixKey<D, P>
 			if index == 0 {
 				index = upper_bound - 1;
 				delta = if left.len() == upper_bound {
-					self.unchecked_last_byte() ^ right[index]
+					one.unchecked_last_byte() ^ right[index]
 				} else {
 					left[index] ^ other.unchecked_last_byte()
 				};
@@ -287,11 +385,11 @@ impl<D, P> PrefixKey<D, P>
 		if delta == 0 {
 			Position {
 				index: index + 1,
-				mask: P::Mask::empty(),
+				mask: MaskFor::<N>::empty(),
 			}
 		} else {
 			//let mask = 255u8 >> delta.leading_zeros();
-			let mask = P::mask_from_delta(delta);
+			let mask = N::mask_from_delta(delta);
 /*			let mask = if index == 0 {
 				self.start.mask_mask(mask)
 			} else {
@@ -304,7 +402,7 @@ impl<D, P> PrefixKey<D, P>
 		}
 	}
 
-	fn common_depth_next(&self, other: &Self) -> Descent<P> {
+//	fn common_depth_next(&self, other: &Self) -> Descent<P> {
 /*		// key must be aligned.
 		assert!(self.start == other.start);
 		let left = self.data.borrow();
@@ -352,8 +450,7 @@ impl<D, P> PrefixKey<D, P>
 				mask,
 			}
 		}*/
-		unimplemented!()
-	}
+//	}
 /*
 	// TODO remove that??
 	fn index(&self, ix: Position<P>) -> P::KeyIndex {
@@ -369,7 +466,6 @@ impl<D, P> PrefixKey<D, P>
 		}
 	}
 */
-}
 
 impl<P> PrefixKey<Vec<u8>, P>
 	where
@@ -388,52 +484,122 @@ impl<P> PrefixKey<Vec<u8>, P>
 	}
 }
 
-#[derive(PartialEq, Eq, Debug)]
-struct Node<P>
+// TODO macro node code to replace children instance
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(Debug)]
+#[derivative(PartialEq)]
+struct NodeOld256<P>
 	where
-		P: PrefixKeyConf,
+		P: RadixConf,
+//		C: Children<Self, Radix = P>,
 {
 	// TODO this should be able to use &'a[u8] for iteration
 	// and querying.
-	pub key: PrefixKey<Vec<u8>, P>,
+	pub key: PrefixKey<Vec<u8>, P::Alignment>,
 	//pub value: usize,
 	pub value: Option<Vec<u8>>,
 	//pub left: usize,
 	//pub right: usize,
 	// TODO if backend behind, then Self would neeed to implement a Node trait with lazy loading...
-	pub children: Children<Self>,
+	pub children: Children256<Self>,
 }
 
-impl<P> Node<P>
+impl<P> Node for NodeOld256<P>
 	where
-		P: PrefixKeyConf,
+		P: RadixConf,
 {
-	fn leaf(key: &[u8], start: Position<P>, value: Vec<u8>) -> Self {
-		Node {
-			key: PrefixKey::new_offset(key, start),
-			value: Some(value),
-			children: Children::empty(),
+	type Radix = P;
+	type InitFrom = ();
+	fn new(
+		key: &[u8],
+		position: PositionFor<Self>,
+		value: Option<&[u8]>,
+		_init: Self::InitFrom,
+	) -> Self {
+		NodeOld256 {
+			key: PrefixKey::new_offset(key, position),
+			value: value.map(|v| v.to_vec()),
+			children: Children256::<Self>::empty(),
 		}
 	}
 }
 
-#[derive(PartialEq, Eq, Debug)]
-pub struct PrefixMap<P>
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(Debug)]
+#[derivative(PartialEq)]
+struct NodeOld<P, C>
 	where
-		P: PrefixKeyConf,
+		P: RadixConf,
+		C: Children<Self, Radix = P>,
+{
+	// TODO this should be able to use &'a[u8] for iteration
+	// and querying.
+	pub key: PrefixKey<Vec<u8>, P::Alignment>,
+	//pub value: usize,
+	pub value: Option<Vec<u8>>,
+	//pub left: usize,
+	//pub right: usize,
+	// TODO if backend behind, then Self would neeed to implement a Node trait with lazy loading...
+	pub children: C,
+}
+
+impl<P, C> NodeOld<P, C>
+	where
+		P: RadixConf,
+		C: Children<Self, Radix = P>,
+{
+	fn leaf(key: &[u8], start: Position<P::Alignment>, value: Vec<u8>) -> Self {
+		NodeOld {
+			key: PrefixKey::new_offset(key, start),
+			value: Some(value),
+			children: C::empty(),
+		}
+	}
+}
+
+impl<P, C> Node for NodeOld<P, C>
+	where
+		P: RadixConf,
+		C: Children<Self, Radix = P>,
+{
+	type Radix = P;
+	type InitFrom = ();
+	fn new(
+		key: &[u8],
+		position: PositionFor<Self>,
+		value: Option<&[u8]>,
+		_init: Self::InitFrom,
+	) -> Self {
+		NodeOld {
+			key: PrefixKey::new_offset(key, position),
+			value: value.map(|v| v.to_vec()),
+			children: C::empty(),
+		}
+	}
+}
+
+#[derive(Derivative)]
+#[derivative(Clone(bound=""))]
+#[derivative(Debug(bound=""))]
+#[derivative(PartialEq(bound=""))]
+pub struct Trie<N>
+	where
+		N: Node,
 {
 	//tree: Vec<Node>,
-	tree: Option<Node<P>>,
+	tree: Option<N>,
 	//values: Vec<Vec<u8>>,
 	//keys: Vec<u8>,
 }
 
-impl<P> PrefixMap<P>
+impl<N> Trie<N>
 	where
-		P: PrefixKeyConf,
+		N: Node,
 {
 	pub fn new() -> Self {
-		PrefixMap {
+		Trie {
 			tree: None,
 		}
 	}
@@ -441,47 +607,99 @@ impl<P> PrefixMap<P>
 	// TODO should we add value as borrow, skip alloc
 	// will see when benching
 	pub fn insert(&mut self, key: &[u8], value: Vec<u8>) -> Option<Vec<u8>> {
-		if let Some(tree) = self.tree.as_mut() {
+/*		if let Some(tree) = self.tree.as_mut() {
 			let (parent, descent) = tree.prefix_node_mut(key);
 			//	let (prefix, right) = PrefixKey::from(key[key_start..], mask);
 			unimplemented!()
 		} else {
-			self.tree = Some(Node::leaf(key, Position::zero(), value));
+			self.tree = Some(NodeOld::leaf(key, Position::zero(), value));
 			None
-		}
+		}*/
+		unimplemented!()
 	}
 }
 
-#[derive(PartialEq, Eq, Debug)]
-struct Children<N> {
-	left: Option<Box<N>>,
-	right: Option<Box<N>>,
+pub trait Children<N>: Clone + Debug + PartialEq {
+	type Radix: RadixConf;
+
+	fn empty() -> Self;
 }
 
-impl<N> Children<N> {
+#[derive(Derivative)]
+#[derivative(Clone)]
+#[derivative(Debug)]
+#[derivative(PartialEq)]
+struct Children2<N> (
+	Option<Box<(N, N)>>
+);
+
+impl<N: Node> Children<N> for Children2<N> {
+	type Radix = Radix2Conf;
+
 	fn empty() -> Self {
-		Children {
-			left: None,
-			right: None,
+		Children2(None)
+	}
+}
+
+#[derive(Derivative)]
+#[derivative(Clone)]
+struct Children256<N> (
+	// 256 array is to big but ok for initial implementation
+	Option<Box<[N; 256]>>
+);
+
+impl<N: PartialEq> PartialEq for Children256<N> {
+	fn eq(&self, other: &Self) -> bool {
+		match (self.0.as_ref(), other.0.as_ref()) {
+			(Some(self_children), Some(other_children)) =>  {
+				for i in 0..256 {
+					if self_children[i] != other_children[i] {
+						return false;
+					}
+				}
+				true
+			},
+			(None, None) => true,
+			_ => false,
 		}
 	}
 }
+impl<N: Debug> Debug for Children256<N> {
+	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::result::Result<(), core::fmt::Error> {
+		if let Some(children) = self.0.as_ref() {
+			children[..].fmt(f)
+		} else {
+			let empty: &[N] = &[]; 
+			empty.fmt(f)
+		}
+	}
+}
+
+impl<N: Node> Children<N> for Children256<N> {
+	type Radix = Radix256RadixConf;
+
+	fn empty() -> Self {
+		Children256(None)
+	}
+}
+
 
 enum Descent<P>
 	where
-		P: PrefixKeyConf,
+		P: RadixConf,
 {
 	// index in input key
-	Child(Position<P>, P::KeyIndex),
-	Middle(Position<P>, P::KeyIndex),
-	Match(Position<P>),
+	Child(Position<P::Alignment>, P::KeyIndex),
+	Middle(Position<P::Alignment>, P::KeyIndex),
+	Match(Position<P::Alignment>),
 //	// position mask left of this node
 //	Middle(usize, u8),
 }
 
-impl<P> Node<P>
+impl<P, C> NodeOld<P, C>
 	where
-		P: PrefixKeyConf,
+		P: RadixConf,
+		C: Children<Self, Radix = P>,
 {
 	fn prefix_node(&self, key: &[u8]) -> (&Self, Descent<P>) {
 		unimplemented!()
@@ -495,17 +713,19 @@ impl<P> Node<P>
 mod test {
 	use crate::*;
 
+	type Node = NodeOld2<Radix256RadixConf>;
+
 	#[test]
 	fn empty_are_equals() {
-		let t1 = PrefixMap::new();
-		let t2 = PrefixMap::new();
+		let t1 = Trie::<Node>::new();
+		let t2 = Trie::<Node>::new();
 		assert_eq!(t1, t2);
 	}
 
 	#[test]
 	fn inserts_are_equals() {
-		let mut t1 = PrefixMap::new();
-		let mut t2 = PrefixMap::new();
+		let mut t1 = Trie::<Node>::new();
+		let mut t2 = Trie::<Node>::new();
 		let value1 = b"value1".to_vec();
 		assert_eq!(None, t1.insert(b"key1", value1.clone()));
 		assert_eq!(None, t2.insert(b"key1", value1.clone()));
