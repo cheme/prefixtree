@@ -1526,7 +1526,7 @@ impl<N: Node> Trie<N> {
 							let old_position = child_position; // TODO probably incorrect
 							position = child_position.next::<N::Radix>();
 							current_ptr = child as *mut N;
-							parent = Some((current as *mut N, old_position));
+							parent = Some((current, old_position));
 						} else {
 							return None;
 						}
@@ -1537,10 +1537,9 @@ impl<N: Node> Trie<N> {
 					Descent::Match(position) => {
 						let mut result = current.remove_value();
 						if current.number_child() == 0 {
-							if let Some((parent_ptr, parent_position)) = parent {
+							if let Some((parent, parent_position)) = parent {
 								let parent_index = parent_position.index::<N::Radix>(key)
 									.expect("was resolved from key");
-								let mut parent = unsafe { parent_ptr.as_mut().unwrap() };
 								parent.remove_child(parent_index);
 								if parent.value().is_none() && parent.number_child() == 1 {
 									parent.fuse_child(key);
