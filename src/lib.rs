@@ -1493,31 +1493,40 @@ impl<N: Node> Trie<N> {
 	}
 	pub fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>> {
 		let mut position = PositionFor::<N>::zero();
+		let mut empty_tree = None;
 		if let Some(top) = self.tree.as_mut() {
 			let mut current: &mut N = top;
 			if key.len() == 0 && current.depth() == 0 {
 				let result = current.remove_value();
 				if current.number_child() == 0 {
-					self.tree = None;
+					empty_tree = Some(result);
+//					self.tree = None;
+				} else {
+					if current.number_child() == 1 {
+						current.fuse_child(key);
+					}
+					return result;
 				}
-				if current.number_child() == 1 {
-					current.fuse_child(key);
-				}
-				return result;
 			}
 			let dest_position = PositionFor::<N> {
 				index: key.len() - 1,
 				mask: MaskFor::<N::Radix>::last(),
 			};
+			if let Some(result) = empty_tree {
+				self.tree = None;
+				return result;
+			}
 			let mut parent = None;
+			let mut current_ptr: *mut N = current;
 			loop {
+				let mut current = unsafe { current_ptr.as_mut().unwrap() };
 				match current.descend(key, position, dest_position) {
 					Descent::Child(child_position, index) => {
 						if let Some(child) = current.get_child_mut(index) {
 							let old_position = child_position; // TODO probably incorrect
 							position = child_position.next::<N::Radix>();
-							let old_current = core::mem::replace(&mut current, child);
-							parent = Some((old_current, old_position));
+							current_ptr = child as *mut N;
+							parent = Some((current as *mut N, old_position));
 						} else {
 							return None;
 						}
@@ -1528,16 +1537,19 @@ impl<N: Node> Trie<N> {
 					Descent::Match(position) => {
 						let mut result = current.remove_value();
 						if current.number_child() == 0 {
-							if let Some((parent, parent_position)) = parent {
+							if let Some((parent_ptr, parent_position)) = parent {
 								let parent_index = parent_position.index::<N::Radix>(key)
 									.expect("was resolved from key");
+								let mut parent = unsafe { parent_ptr.as_mut().unwrap() };
 								parent.remove_child(parent_index);
 								if parent.value().is_none() && parent.number_child() == 1 {
 									parent.fuse_child(key);
 								}
 							} else {
 								// root
-								self.tree = None;
+//								self.tree = None;
+								empty_tree = Some(result);
+								break;
 							}
 						}
 						if current.number_child() == 1 {
@@ -1549,9 +1561,12 @@ impl<N: Node> Trie<N> {
 					},
 				}
 			}
-		} else {
-			None
+			if let Some(result) = empty_tree {
+				self.tree = None;
+				return result;
+			}
 		}
+		None
 	}
 	pub fn clear(&mut self) {
 		// TODO use iter mut
