@@ -1519,7 +1519,7 @@ impl<N: Node> Trie<N> {
 			let mut parent = None;
 			let mut current_ptr: *mut N = current;
 			loop {
-				let mut current = unsafe { current_ptr.as_mut().unwrap() };
+				let current = unsafe { current_ptr.as_mut().unwrap() };
 				match current.descend(key, position, dest_position) {
 					Descent::Child(child_position, index) => {
 						if let Some(child) = current.get_child_mut(index) {
@@ -1534,8 +1534,8 @@ impl<N: Node> Trie<N> {
 					Descent::Middle(_middle_position, _index) => {
 						return None;
 					},
-					Descent::Match(position) => {
-						let mut result = current.remove_value();
+					Descent::Match(_position) => {
+						let result = current.remove_value();
 						if current.number_child() == 0 {
 							if let Some((parent, parent_position)) = parent {
 								let parent_index = parent_position.index::<N::Radix>(key)
