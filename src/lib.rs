@@ -57,6 +57,7 @@ use hash_db::MaybeDebug;
 use self::rstd::{boxed::Box, vec::Vec};
 */
 
+// TODO consider removal
 #[derive(Derivative)]
 #[derivative(Clone)]
 #[derivative(Debug)]
@@ -90,6 +91,11 @@ impl PrefixKeyConf for bool {
 	type Mask = bool;
 }
 
+impl PrefixKeyConf for u8 {
+	const ALIGNED: bool = false;
+	type Mask = u8;
+}
+
 type MaskFor<N> = <<N as RadixConf>::Alignment as PrefixKeyConf>::Mask;
 
 /// Definition of node handle.
@@ -116,15 +122,11 @@ pub trait RadixConf {
 		}
 		(previous_mask, bytes)
 	}
+	/// Get index at a given position.
+	fn index(key: &[u8], at: Position<Self::Alignment>) -> Option<Self::KeyIndex>;
 	/// (get a mask corresponding to a end position).
 	// let mask = !(255u8 >> delta.leading_zeros()); + TODO round to nibble
 	fn mask_from_delta(delta: u8) -> MaskFor<Self>;
-
-	fn mask_first() -> MaskFor<Self> {
-		let (mask, next) = Self::advance(MaskFor::<Self>::empty());
-		debug_assert!(next == 0);
-		mask
-	}
 }
 
 type PositionFor<N> = Position<<<N as Node>::Radix as RadixConf>::Alignment>;
@@ -163,34 +165,15 @@ pub trait Node: Clone + PartialEq + Debug {
 
 }
 
-pub struct Radix256RadixConf;
+pub struct Radix256Conf;
 pub struct Radix2Conf;
+pub struct Radix16Conf;
 
-impl RadixConf for Radix256RadixConf {
-	type Alignment = ();
-	type KeyIndex = u8;
-	const CHILDREN_CAPACITY: usize = 256;
-	const DEPTH: usize = 1;
-	fn advance(_previous_mask: MaskFor<Self>) -> (MaskFor<Self>, usize) {
-		((), 1)
-	}
-	fn advance_by(_previous_mask: MaskFor<Self>, nb: usize) -> (MaskFor<Self>, usize) {
-		((), nb)
-	}
-	fn mask_from_delta(_delta: u8) -> MaskFor<Self> {
-		()
-	}
-
-	fn mask_first() -> MaskFor<Self> {
-		()
-	}
-}
-
-impl RadixConf for Radix2Conf {
+impl RadixConf for Radix16Conf {
 	type Alignment = bool;
-	type KeyIndex = bool;
-	const CHILDREN_CAPACITY: usize = 2;
-	const DEPTH: usize = 1;
+	type KeyIndex = u8;
+	const CHILDREN_CAPACITY: usize = 16;
+	const DEPTH: usize = 4;
 	fn advance(previous_mask: MaskFor<Self>) -> (MaskFor<Self>, usize) {
 		if previous_mask {
 			(false, 1)
@@ -204,16 +187,72 @@ impl RadixConf for Radix2Conf {
 	fn mask_from_delta(_delta: u8) -> MaskFor<Self> {
 		unimplemented!()
 	}
-	fn mask_first() -> MaskFor<Self> {
-		true
+	fn index(key: &[u8], at: Position<Self::Alignment>) -> Option<Self::KeyIndex> {
+		key.get(at.index).map(|byte| {
+			at.mask.index(*byte)
+		})
+	}
+}
+
+
+impl RadixConf for Radix256Conf {
+	type Alignment = ();
+	type KeyIndex = u8;
+	const CHILDREN_CAPACITY: usize = 256;
+	const DEPTH: usize = 1;
+	fn advance(_previous_mask: MaskFor<Self>) -> (MaskFor<Self>, usize) {
+		((), 1)
+	}
+	fn advance_by(_previous_mask: MaskFor<Self>, nb: usize) -> (MaskFor<Self>, usize) {
+		((), nb)
+	}
+	fn mask_from_delta(_delta: u8) -> MaskFor<Self> {
+		()
+	}
+	fn index(key: &[u8], at: Position<Self::Alignment>) -> Option<Self::KeyIndex> {
+		key.get(at.index).map(|byte| {
+			at.mask.index(*byte)
+		})
+	}
+}
+
+impl RadixConf for Radix2Conf {
+	type Alignment = u8;
+	type KeyIndex = bool;
+	const CHILDREN_CAPACITY: usize = 2;
+	const DEPTH: usize = 1;
+	fn advance(previous_mask: MaskFor<Self>) -> (MaskFor<Self>, usize) {
+		if previous_mask < 255 {
+			(previous_mask + 1, 0)
+		} else {
+			(0, 1)
+		}
+	}
+	fn advance_by(_previous_mask: MaskFor<Self>, nb: usize) -> (MaskFor<Self>, usize) {
+		unimplemented!()
+	}
+	fn mask_from_delta(_delta: u8) -> MaskFor<Self> {
+		unimplemented!()
+	}
+	fn index(key: &[u8], at: Position<Self::Alignment>) -> Option<Self::KeyIndex> {
+		key.get(at.index).map(|byte| {
+			at.mask.index(*byte) > 0
+		})
 	}
 }
 
 /// Mask a byte for unaligned prefix key.
+/// Note that no configuration of `MaskKeyByte` should result
+/// in an empty byte. Instead of an empty byte we should use
+/// the full byte configuration (`last`) at the previous index.
 pub trait MaskKeyByte: Clone + Copy + PartialEq + Debug {
+	/// Mask right part of the last byte.
 	fn mask(&self, byte: u8) -> u8;
+	/// Extract u8 index from this byte.
+	fn index(&self, byte: u8) -> u8;
 //	fn mask_mask(&self, other: Self) -> Self;
-	fn empty() -> Self;
+	fn first() -> Self;
+	fn last() -> Self;
 }
 
 impl MaskKeyByte for () {
@@ -223,9 +262,16 @@ impl MaskKeyByte for () {
 /*	fn mask_mask(&self, other: Self) -> Self {
 		()
 	}*/
-	fn empty() -> Self {
+	fn first() -> Self {
 		()
 	}
+	fn last() -> Self {
+		()
+	}
+	fn index(&self, byte: u8) -> u8 {
+		byte
+	}
+
 }
 
 impl MaskKeyByte for bool {
@@ -236,7 +282,17 @@ impl MaskKeyByte for bool {
 			byte
 		}
 	}
-	fn empty() -> Self {
+	fn index(&self, byte: u8) -> u8 {
+		if *self {
+			(byte & 0xf0) >> 4
+		} else {
+			byte & 0x0f
+		}
+	}
+	fn first() -> Self {
+		true
+	}
+	fn last() -> Self {
 		false
 	}
 }
@@ -244,13 +300,19 @@ impl MaskKeyByte for bool {
 
 impl MaskKeyByte for u8 {
 	fn mask(&self, byte: u8) -> u8 {
-		self & byte
+		byte & (0b11111111 << (7 - self) )
+	}
+	fn index(&self, byte: u8) -> u8 {
+		byte & (0b1000000 >> self)
 	}
 /*	fn mask_mask(&self, other: Self) -> Self {
 		self & other
 	}*/
-	fn empty() -> Self {
+	fn first() -> Self {
 		0
+	}
+	fn last() -> Self {
+		7
 	}
 }
 
@@ -305,15 +367,18 @@ impl<P> Position<P>
 	fn zero() -> Self {
 		Position {
 			index: 0,
-			mask: P::Mask::empty(),
+			mask: P::Mask::first(),
 		}
 	}
 	fn next<R: RadixConf<Alignment = P>>(&self) -> Self {
 		let (mask, increment) = R::advance(self.mask);
 		Position {
 			index: self.index + increment,
-			mask: P::Mask::empty(),
+			mask,
 		}
+	}
+	fn index<R: RadixConf<Alignment = P>>(&self, key: &[u8]) -> Option<R::KeyIndex> {
+		R::index(key, *self)
 	}
 }
 
@@ -324,8 +389,8 @@ impl<D, P> PrefixKey<D, P>
 {
 	fn empty() -> Self {
 		PrefixKey {
-			start: P::Mask::empty(),
-			end: P::Mask::empty(),
+			start: P::Mask::first(),
+			end: P::Mask::first(),
 			data: Default::default(),
 		}
 	}
@@ -377,13 +442,13 @@ fn common_depth<D, N>(one: &PrefixKey<D, N::Alignment>, other: &PrefixKey<D, N::
 				if left[index] != right[index] {
 					return Position {
 						index,
-						mask: MaskFor::<N>::empty(),
+						mask: MaskFor::<N>::first(),
 					}
 				}
 			}
 			return Position {
 				index: upper_bound,
-				mask: MaskFor::<N>::empty(),
+				mask: MaskFor::<N>::first(),
 			}
 		}
 		if one.start != other.start {
@@ -395,7 +460,7 @@ fn common_depth<D, N>(one: &PrefixKey<D, N::Alignment>, other: &PrefixKey<D, N::
 			return Position::zero();
 		}
 		let mut index = 0;
-		let mut delta = one.unchecked_first_byte() ^ other.unchecked_last_byte();
+		let mut delta = one.unchecked_first_byte() ^ other.unchecked_first_byte();
 		if delta == 0 {
 			let upper_bound = min(left.len(), right.len());
 			for i in 1..(upper_bound - 1) {
@@ -406,19 +471,24 @@ fn common_depth<D, N>(one: &PrefixKey<D, N::Alignment>, other: &PrefixKey<D, N::
 			}
 			if index == 0 {
 				index = upper_bound - 1;
+					/*
 				delta = if left.len() == upper_bound {
 					one.unchecked_last_byte() ^ right[index]
+						& !one.end.mask(255)
 				} else {
 					left[index] ^ other.unchecked_last_byte()
+						& !other.end.mask(255)
 				};
+					i*/
+					unimplemented!("TODO do with a mask_end function.");
 			} else {
 				delta = left[index] ^ right[index];
 			}
 		}
 		if delta == 0 {
 			Position {
-				index: index + 1,
-				mask: MaskFor::<N>::empty(),
+				index: index,
+				mask: MaskFor::<N>::last(),
 			}
 		} else {
 			//let mask = 255u8 >> delta.leading_zeros();
@@ -434,6 +504,7 @@ fn common_depth<D, N>(one: &PrefixKey<D, N::Alignment>, other: &PrefixKey<D, N::
 			}
 		}
 	}
+
 
 //	fn common_depth_next(&self, other: &Self) -> Descent<P> {
 /*		// key must be aligned.
@@ -511,7 +582,7 @@ impl<P> PrefixKey<Vec<u8>, P>
 		}*/
 		PrefixKey {
 			start: start.mask,
-			end: P::Mask::empty(),
+			end: P::Mask::last(),
 			data,
 		}
 	}
@@ -731,7 +802,7 @@ impl<N: Debug> Debug for Children256<N> {
 }
 
 impl<N: Node> Children<N> for Children256<N> {
-	type Radix = Radix256RadixConf;
+	type Radix = Radix256Conf;
 
 	fn empty() -> Self {
 		Children256(None)
@@ -743,7 +814,7 @@ impl<N: Node> Children<N> for Children256<N> {
 #[derivative(Clone)]
 struct Children256Bis (
 	// 256 array is to big but ok for initial implementation
-	Option<Box<[NodeOld<Radix256RadixConf, Children256Bis>; 256]>>
+	Option<Box<[NodeOld<Radix256Conf, Children256Bis>; 256]>>
 );
 
 impl PartialEq for Children256Bis {
@@ -767,14 +838,14 @@ impl Debug for Children256Bis {
 		if let Some(children) = self.0.as_ref() {
 			children[..].fmt(f)
 		} else {
-			let empty: &[NodeOld<Radix256RadixConf, Children256Bis>] = &[]; 
+			let empty: &[NodeOld<Radix256Conf, Children256Bis>] = &[]; 
 			empty.fmt(f)
 		}
 	}
 }
 
-impl Children<NodeOld<Radix256RadixConf, Children256Bis>> for Children256Bis {
-	type Radix = Radix256RadixConf;
+impl Children<NodeOld<Radix256Conf, Children256Bis>> for Children256Bis {
+	type Radix = Radix256Conf;
 
 	fn empty() -> Self {
 		Children256Bis(None)
@@ -870,7 +941,6 @@ impl<N: Node> NodeStackMut<N> {
 	}
 }
 
-
 pub struct SeekIter<'a, N: Node> {
 	trie: &'a Trie<N>,
 	dest: &'a [u8],
@@ -882,12 +952,12 @@ pub struct SeekIter<'a, N: Node> {
 	next: Descent<N::Radix>,
 }
 pub struct SeekValueIter<'a, N: Node>(SeekIter<'a, N>);
-	
+
 impl<N: Node> Trie<N> {
 	pub fn seek_iter<'a>(&'a self, key: &'a [u8]) -> SeekIter<'a, N> {
 		let dest_position = Position {
 			index: key.len(),
-			mask: MaskFor::<N::Radix>::empty(),
+			mask: MaskFor::<N::Radix>::last(),
 		};
 		self.seek_iter_at(key, dest_position)
 	}
@@ -909,6 +979,23 @@ impl<N: Node> Trie<N> {
 
 
 impl<'a, N: Node> SeekIter<'a, N> {
+	pub fn iter(self) -> Iter<'a, N> {
+		let dest = self.dest;
+		let stack = self.stack.stack.into_iter().map(|(pos, node)| {
+			let pos = pos.next::<N::Radix>();
+			let key = pos.index::<N::Radix>(dest)
+				.expect("Seek iter is only producing correct position for this key.");
+			(pos, node, key)
+		}).collect();
+		Iter {
+			trie: self.trie,
+			stack: IterStack {
+				stack,
+			},
+			finished: false,
+		}
+	}
+
 	pub fn value_iter(self) -> SeekValueIter<'a, N> {
 		SeekValueIter(self)
 	}
@@ -991,7 +1078,7 @@ impl<N: Node> Trie<N> {
 	pub fn seek_iter_mut<'a>(&'a mut self, key: &'a [u8]) -> SeekIterMut<'a, N> {
 		let dest_position = Position {
 			index: key.len(),
-			mask: MaskFor::<N::Radix>::empty(),
+			mask: MaskFor::<N::Radix>::last(),
 		};
 		self.seek_iter_at_mut(key, dest_position)
 	}
@@ -1084,11 +1171,49 @@ impl<'a, N: Node> Iterator for SeekValueIterMut<'a, N> {
 	}
 }
 
+/// Stack of Node to reach a position.
+struct IterStack<'a, N: Node> {
+	// TODO use smallvec instead
+	// The index is the current index where we descend into.
+	stack: Vec<(PositionFor<N>, &'a N, KeyIndexFor<N>)>,
+}
+
+// TODO put pointers in node stack.
+impl<'a, N: Node> IterStack<'a, N> {
+	fn new() -> Self {
+		IterStack {
+			stack: Vec::new(),
+		}
+	}
+}
+
+pub struct Iter<'a, N: Node> {
+	trie: &'a Trie<N>,
+	stack: IterStack<'a, N>,
+	finished: bool,
+}
+
+pub struct ValueIter<'a, N: Node>(Iter<'a, N>);
+
+impl<N: Node> Trie<N> {
+	pub fn iter<'a>(&'a mut self) -> Iter<'a, N> {
+		Iter {
+			trie: self,
+			stack: IterStack {
+				stack: Default::default(),
+			},
+			finished: false,
+		}
+	}
+}
+
+
+
 #[cfg(test)]
 mod test {
 	use crate::*;
 
-	type Node = NodeOld<Radix256RadixConf, Children256Bis>;
+	type Node = NodeOld<Radix256Conf, Children256Bis>;
 
 	#[test]
 	fn empty_are_equals() {
